@@ -1,0 +1,8 @@
+# Workspace-level Cargo configuration.
+#
+# The `xtask` alias makes `cargo xtask <subcommand>` the single entry point for
+# all build, deploy, and run operations. This follows the xtask convention
+# described at <https://github.com/matklad/cargo-xtask>.
+
+[alias]
+xtask = "run --package xtask --"

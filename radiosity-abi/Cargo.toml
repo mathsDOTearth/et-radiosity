@@ -1,0 +1,9 @@
+[package]
+name = "radiosity-abi"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no_std ABI types for the et-radiosity host and kernel crates"
+
+# This crate must remain no_std so the device kernel crate can depend on it.
+[dependencies]
+et-abi = "0.5"

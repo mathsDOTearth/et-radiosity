@@ -1,0 +1,21 @@
+# Cross-compilation configuration for ET-SoC-1 compute harts.
+#
+# The ET-SoC-1 harts implement RV64IMAC (integer, multiply, atomic, compressed)
+# running in U-mode. The standard F/D floating-point extensions are not present
+# in the hart ISA; f32 arithmetic is lowered to soft-float routines provided by
+# compiler_builtins. The tensor-extension instructions (TensorFMA32) are custom
+# CSR writes and are unaffected by this choice.
+#
+# The kernel is linked at a fixed U-mode entry address (see link.ld), so the
+# medany (PC-relative) code model is required. Static relocation avoids GOT
+# indirection in a position-dependent image.
+
+[build]
+target = "riscv64imac-unknown-none-elf"
+
+[target.riscv64imac-unknown-none-elf]
+rustflags = [
+    "-C", "code-model=medium",
+    "-C", "link-arg=-Tlink.ld",
+    "-C", "relocation-model=static",
+]

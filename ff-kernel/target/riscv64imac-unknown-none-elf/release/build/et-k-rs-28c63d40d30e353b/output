@@ -1,0 +1,2 @@
+cargo:rustc-link-arg=-T/home/rich/Rust/et-radiosity/ff-kernel/target/riscv64imac-unknown-none-elf/release/build/et-k-rs-28c63d40d30e353b/out/link.ld
+cargo:rerun-if-changed=link.ld

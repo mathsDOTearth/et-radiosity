@@ -1,0 +1,23 @@
+[package]
+name = "et-radiosity"
+version = "0.1.0"
+edition = "2024"
+description = "Radiosity renderer for the Esperanto ET-SoC-1 RISC-V accelerator"
+authors = ["mathsDOTearth"]
+
+# The kernel crate cross-compiles to riscv64imac with its own .cargo/config.toml
+# and is therefore excluded from this workspace to prevent the host toolchain from
+# attempting to build it.
+[workspace]
+members  = ["radiosity-abi", "xtask"]
+exclude  = ["ff-kernel"]
+
+[dependencies]
+et-rs    = "0.5"
+et-abi   = "0.5"
+radiosity-abi = { path = "radiosity-abi" }
+
+anyhow   = "1"
+clap     = { version = "4", features = ["derive"] }
+image    = "0.25"
+tobj     = "4"

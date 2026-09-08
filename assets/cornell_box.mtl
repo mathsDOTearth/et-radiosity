@@ -1,0 +1,38 @@
+# Cornell Box materials
+#
+# Reflectance values (Kd) are the CIE XYZ-weighted sRGB coefficients from the
+# original Cornell box measurement data (Goral et al., 1984; Ward, 1994).
+# Emission (Ke) is a custom MTL extension; the value represents area-weighted
+# radiance in W/m^2/sr, sufficient to illuminate the box visibly.
+
+newmtl white
+Kd 0.760 0.749 0.665
+Ke 0.0 0.0 0.0
+
+newmtl red
+Kd 0.630 0.065 0.050
+Ke 0.0 0.0 0.0
+
+newmtl green
+Kd 0.140 0.450 0.091
+Ke 0.0 0.0 0.0
+
+newmtl light
+# The light patch has no diffuse reflectance; it is a pure emitter.
+Kd 0.0 0.0 0.0
+# Ke: area-weighted emission. The physical value for the Cornell box light is
+# approximately 3.14e4 W/sr/m^2 (Ward, 1994), reduced here to 50 W/sr/m^2 for
+# numerical convenience in a single-precision solve.
+# Emission raised 4x to compensate for the reduced light area (0.14x0.14 m
+# vs the original 0.30x0.30 m), preserving total radiant power.
+Ke 200.0 188.0 160.0
+
+newmtl box_white
+# White diffuse box interior to the Cornell box.
+Kd 0.760 0.749 0.665
+Ke 0.0 0.0 0.0
+
+newmtl sphere_blue
+# Blue diffuse sphere interior to the Cornell box.
+Kd 0.200 0.300 0.700
+Ke 0.0 0.0 0.0

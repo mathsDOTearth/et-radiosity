@@ -18,4 +18,7 @@ rustflags = [
     "-C", "code-model=medium",
     "-C", "link-arg=-Tlink.ld",
     "-C", "relocation-model=static",
+    # ET-SoC-1 CPU target enables the F extension and the XAIFET packed-single
+    # ISA so that aif.* instructions assemble.  Requires LLVM >= 23 (nightly).
+    "-C", "target-cpu=et-soc1",
 ]

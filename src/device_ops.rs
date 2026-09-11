@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use et_soc1::{Device, IoctlTransport, TraceConfig};
 use et_soc1::trace::TraceBuffer;
-use radiosity_abi::{FormFactorArgs, OccluderTri};
+use radiosity_abi::FormFactorArgs;
 
 use crate::scene::{Scene, ScenePatch};
 
@@ -62,22 +62,38 @@ pub fn compute_form_factors(
     device.memcpy_h2d(patch_bytes, patch_region.addr)
         .context("DMA patch array")?;
 
-    // --- Upload occluder triangles ---
-    // Convert host OccluderTriangle into the ABI OccluderTri layout.
-    let occ_abi: Vec<OccluderTri> = occluders.iter().map(|o| OccluderTri {
-        v0: o.v0, _pad0: 0.0,
-        v1: o.v1, _pad1: 0.0,
-        v2: o.v2, _pad2: 0.0,
-    }).collect();
-    let occ_bytes   = pod_as_bytes(&occ_abi);
-    let (occ_addr, n_occluders) = if occ_abi.is_empty() {
+    // --- Upload occluder triangles in SoA layout ---
+    //
+    // The PS SIMD kernel processes 8 triangles per iteration using FLW.PS
+    // (eight consecutive f32 values loaded into one 256-bit register). AoS
+    // layout would require gather instructions; SoA permits simple strided
+    // loads from contiguous memory.
+    //
+    // Layout: nine f32[n_padded] arrays -- v0x, v0y, v0z, v1x, v1y, v1z,
+    // v2x, v2y, v2z -- where n_padded = ceil(n, 8). Trailing slots are 0.0.
+    let n_occ = occluders.len();
+    let (occ_addr, n_occluders) = if n_occ == 0 {
         (0u64, 0u32)
     } else {
-        let region = device.alloc(occ_bytes.len() as u64)
-            .context("alloc occluder array")?;
-        device.memcpy_h2d(occ_bytes, region.addr)
-            .context("DMA occluder array")?;
-        (region.addr, occ_abi.len() as u32)
+        let n_padded = (n_occ + 7) & !7;  // round up to multiple of 8
+        let mut soa = vec![0.0f32; 9 * n_padded];
+        for (i, o) in occluders.iter().enumerate() {
+            soa[0 * n_padded + i] = o.v0[0];
+            soa[1 * n_padded + i] = o.v0[1];
+            soa[2 * n_padded + i] = o.v0[2];
+            soa[3 * n_padded + i] = o.v1[0];
+            soa[4 * n_padded + i] = o.v1[1];
+            soa[5 * n_padded + i] = o.v1[2];
+            soa[6 * n_padded + i] = o.v2[0];
+            soa[7 * n_padded + i] = o.v2[1];
+            soa[8 * n_padded + i] = o.v2[2];
+        }
+        let soa_bytes = pod_as_bytes(&soa);
+        let region = device.alloc(soa_bytes.len() as u64)
+            .context("alloc SoA occluder array")?;
+        device.memcpy_h2d(soa_bytes, region.addr)
+            .context("DMA SoA occluder array")?;
+        (region.addr, n_occ as u32)
     };
 
     // --- Allocate form-factor output ---

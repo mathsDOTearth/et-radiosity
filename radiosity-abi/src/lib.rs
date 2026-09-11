@@ -69,12 +69,19 @@ pub struct OccluderTri {
 /// ```text
 /// offset  0: patches_addr    -- device address of Patch[n_patches]
 /// offset  8: ff_matrix_addr  -- device address of f32[n_patches * n_patches]
-/// offset 16: occluder_addr   -- device address of OccluderTri[n_occluders]
+/// offset 16: occluder_addr   -- device address of SoA occluder block
 /// offset 24: n_patches
 /// offset 28: n_harts
 /// offset 32: n_occluders
 /// offset 36: _pad
 /// ```
+///
+/// The SoA occluder block at `occluder_addr` contains nine contiguous
+/// `f32[n_padded]` arrays (where `n_padded = (n_occluders + 7) & !7`):
+/// v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z -- in that order.
+/// Trailing elements beyond `n_occluders` are zero-padded.
+/// This layout allows the PS SIMD kernel to issue eight-lane `FLW.PS` loads
+/// without gather instructions.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FormFactorArgs {
@@ -83,8 +90,8 @@ pub struct FormFactorArgs {
     /// Device address of the output form-factor matrix (`f32[n_patches * n_patches]`),
     /// stored row-major: element `(i, j)` is at byte offset `(i * n_patches + j) * 4`.
     pub ff_matrix_addr: u64,
-    /// Device address of the occluder triangle array (`OccluderTri[n_occluders]`).
-    /// May be zero when `n_occluders == 0` (empty box, no visibility testing).
+    /// Device address of the SoA occluder block (nine `f32[n_padded]` arrays).
+    /// Zero when `n_occluders == 0` (convex enclosure, no visibility testing).
     pub occluder_addr: u64,
     /// Number of patches.
     pub n_patches: u32,

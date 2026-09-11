@@ -128,34 +128,12 @@ fn main() -> Result<()> {
     )?;
     let device_elapsed = t_device_start.elapsed();
 
-    // --- Diagnostics: check FF matrix and emission values before solve ---
-    {
-        let max_ff = ff_matrix.iter().cloned().fold(0.0f32, f32::max);
-        let nonzero_ff = ff_matrix.iter().filter(|&&v| v > 0.0).count();
-        eprintln!("FF matrix: max={:.6}  non-zero entries={}/{}", max_ff, nonzero_ff, ff_matrix.len());
-
-        for (i, p) in scene.patches.iter().enumerate() {
-            if p.emission.iter().any(|&e| e > 0.0) {
-                eprintln!("  emitter patch {}: emission={:?}  centroid={:?}  normal={:?}",
-                    i, p.emission, p.abi.centroid, p.abi.normal);
-            }
-        }
-    }
-
     // --- Solve radiosity on host ---
     let t_solve_start = Instant::now();
     let radiosities = device_ops::solve_radiosity(
         &scene.patches, &ff_matrix, args.iterations,
     );
     let solve_elapsed = t_solve_start.elapsed();
-
-    // --- Diagnostics: check radiosity values after solve ---
-    {
-        let max_rad = radiosities.iter()
-            .flat_map(|&[r, g, b]| [r, g, b])
-            .fold(0.0f32, f32::max);
-        eprintln!("Post-solve: max radiosity component = {:.4}", max_rad);
-    }
 
     // --- Render to PNG ---
     let t_render_start = Instant::now();

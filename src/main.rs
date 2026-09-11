@@ -20,7 +20,7 @@ mod render;
 mod scene;
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -108,6 +108,13 @@ fn main() -> Result<()> {
     // --- Open device ---
     let device = Device::open(args.device)
         .with_context(|| format!("opening ET-SoC-1 device index {}", args.device))?;
+
+    // Override the 10-second default command-response timeout (et-rs <= 0.5.2
+    // applied this deadline to every device command including load_kernel and
+    // launch_spmd). With the hemisphere filter and all shires active the kernel
+    // completes in well under 2 s at any supported patch size; 300 s is a
+    // conservative ceiling that accommodates DMA transfers and slow paths.
+    device.set_default_launch_timeout(Duration::from_secs(300));
 
     // --- Compute form-factor matrix on device ---
     // compute_form_factors returns the matrix and the wall-clock duration of

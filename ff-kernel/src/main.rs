@@ -76,7 +76,6 @@ pub extern "C" fn entry_point(args_ptr: usize) -> i64 {
 
     for i in row_start..row_end {
         let pi = &patches[i];
-        let mut row_sum = 0.0f32;
 
         for j in 0..n {
             let ff = if i == j {
@@ -90,21 +89,13 @@ pub extern "C" fn entry_point(args_ptr: usize) -> i64 {
             };
 
             // SAFETY: exclusive write to row i; no other hart touches this row.
+            // Row normalisation is performed on the host after DMA download to
+            // avoid reading back from device DRAM within the same kernel launch:
+            // on the ET-Minion store buffer, volatile reads may see stale
+            // content if issued without an explicit fence after the prior writes.
             unsafe {
                 let ptr = (ff_base + (i * n + j) * 4) as *mut f32;
                 ptr.write_volatile(ff);
-            }
-            row_sum += ff;
-        }
-
-        // Normalise to enforce energy conservation.
-        if row_sum > 1.0e-8 {
-            for j in 0..n {
-                unsafe {
-                    let ptr = (ff_base + (i * n + j) * 4) as *mut f32;
-                    let val = ptr.read_volatile();
-                    ptr.write_volatile(val / row_sum);
-                }
             }
         }
     }

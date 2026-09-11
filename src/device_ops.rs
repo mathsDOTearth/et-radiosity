@@ -137,10 +137,30 @@ pub fn compute_form_factors(
     device.memcpy_d2h(ff_region.addr, &mut ff_raw)
         .context("download ff matrix")?;
 
-    let ff: Vec<f32> = ff_raw
+    let mut ff: Vec<f32> = ff_raw
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
+
+    // Normalise each row so that sum_j F[i][j] <= 1 (energy conservation).
+    // This is done on the host rather than in the kernel to avoid a store-buffer
+    // ordering hazard: on the ET-Minion cores, reading device DRAM immediately
+    // after writing it (without an explicit fence) may return stale content.
+    // The host normalises using native f32 hardware after the DMA download,
+    // and also sanitises any NaN/Inf values that could arise from near-zero
+    // centroid distances in the point-to-point form-factor approximation.
+    for row in ff.chunks_mut(n) {
+        // Replace any non-finite values with 0 before summing.
+        for v in row.iter_mut() {
+            if !v.is_finite() { *v = 0.0; }
+        }
+        let row_sum: f32 = row.iter().sum();
+        if row_sum > 1.0e-8 {
+            for v in row.iter_mut() {
+                *v /= row_sum;
+            }
+        }
+    }
 
     eprintln!("  form-factor matrix downloaded ({} values)", ff.len());
     Ok((ff, kernel_elapsed))

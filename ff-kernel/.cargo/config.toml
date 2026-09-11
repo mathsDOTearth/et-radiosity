@@ -18,7 +18,8 @@ rustflags = [
     "-C", "code-model=medium",
     "-C", "link-arg=-Tlink.ld",
     "-C", "relocation-model=static",
-    # ET-SoC-1 CPU target enables the F extension and the XAIFET packed-single
-    # ISA so that aif.* instructions assemble.  Requires LLVM >= 23 (nightly).
-    "-C", "target-cpu=et-soc1",
+    # Note: -C target-cpu=et-soc1 is intentionally absent.  The PS SIMD code
+    # lives in shadow_simd.s, assembled by ET GAS (riscv64-unknown-elf-as
+    # -march=rv64imaf_xet1p0) via build.rs; stable LLVM never sees PS
+    # instructions and does not need to know the et-soc1 CPU name.
 ]

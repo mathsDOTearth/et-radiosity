@@ -330,12 +330,19 @@ fn compute_form_factor(pi: &Patch, pj: &Patch) -> f32 {
     let dy = pj.centroid[1] - pi.centroid[1];
     let dz = pj.centroid[2] - pi.centroid[2];
 
-    let r2 = dx * dx + dy * dy + dz * dz;
-    if r2 < 1.0e-8 {
+    let r2_raw = dx * dx + dy * dy + dz * dz;
+    if r2_raw < 1.0e-8 {
         return 0.0;
     }
 
-    let r  = sqrt_f32(r2);
+    // The point-to-point form factor F = cos_i * cos_j / (pi * r^2) * A_j
+    // diverges as r -> 0.  The approximation is only valid when r >> sqrt(A).
+    // Clamp r^2 to the larger patch area: this caps F at a physically
+    // reasonable value and eliminates the near-field speckle artefact near
+    // the light source without affecting well-separated patch pairs.
+    let r2 = r2_raw.max(pi.area.max(pj.area));
+
+    let r  = sqrt_f32(r2_raw);   // raw distance for direction normalisation
     let nx = dx / r;
     let ny = dy / r;
     let nz = dz / r;

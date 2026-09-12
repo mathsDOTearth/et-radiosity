@@ -21,3 +21,4 @@ anyhow   = "1"
 clap     = { version = "4", features = ["derive"] }
 image    = "0.25"
 tobj     = "4"
+rayon = "1.12.0"

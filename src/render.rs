@@ -15,9 +15,11 @@
 //! standard sRGB transfer function.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
+use rayon::prelude::*;
 
 use crate::scene::ScenePatch;
 
@@ -207,81 +209,98 @@ pub fn render_to_png(
         .max(1.0);
 
     let ro = camera.eye;
-    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
-    for py in 0..height {
-        for px in 0..width {
-            let rd = camera.ray_dir(px, py);
+    // Pre-allocate the pixel buffer: width * height * 3 bytes (RGB).
+    // Rows are computed in parallel; each row owns a disjoint slice of the
+    // buffer so no locking is required.
+    let mut pixels = vec![0u8; (width * height * 3) as usize];
+    let rows_done  = AtomicU32::new(0);
 
-            // Find the nearest hit, recording hit-triangle index and the
-            // Moller-Trumbore barycentric coordinates (u, v).
-            let mut best_t    = f32::INFINITY;
-            let mut best_idx  = usize::MAX;
-            let mut best_u    = 0.0f32;
-            let mut best_v    = 0.0f32;
-            // Indicates the reverse-winding test produced the best hit.
-            let mut best_flip = false;
+    pixels
+        .par_chunks_mut((width * 3) as usize)
+        .enumerate()
+        .for_each(|(py, row_buf)| {
+            for px in 0..width {
+                let rd = camera.ray_dir(px, py as u32);
 
-            for (i, patch) in patches.iter().enumerate() {
-                // Test the triangle's natural winding first.
-                if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v0, patch.v1, patch.v2) {
-                    if t < best_t {
-                        best_t    = t;
-                        best_idx  = i;
-                        best_u    = u;
-                        best_v    = v;
-                        best_flip = false;
+                // Find the nearest hit, recording hit-triangle index and the
+                // Moller-Trumbore barycentric coordinates (u, v).
+                let mut best_t    = f32::INFINITY;
+                let mut best_idx  = usize::MAX;
+                let mut best_u    = 0.0f32;
+                let mut best_v    = 0.0f32;
+                // Indicates the reverse-winding test produced the best hit.
+                let mut best_flip = false;
+
+                for (i, patch) in patches.iter().enumerate() {
+                    // Test the triangle's natural winding first.
+                    if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v0, patch.v1, patch.v2) {
+                        if t < best_t {
+                            best_t    = t;
+                            best_idx  = i;
+                            best_u    = u;
+                            best_v    = v;
+                            best_flip = false;
+                        }
+                    }
+                    // Test the reverse winding: the OBJ normals point inward, so
+                    // patches whose normal faces away from the eye are hit only via
+                    // this path.
+                    if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v2, patch.v1, patch.v0) {
+                        if t < best_t {
+                            best_t    = t;
+                            best_idx  = i;
+                            best_u    = u;
+                            best_v    = v;
+                            best_flip = true;
+                        }
                     }
                 }
-                // Test the reverse winding: the OBJ normals point inward, so
-                // patches whose normal faces away from the eye are hit only via
-                // this path.
-                if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v2, patch.v1, patch.v0) {
-                    if t < best_t {
-                        best_t    = t;
-                        best_idx  = i;
-                        best_u    = u;
-                        best_v    = v;
-                        best_flip = true;
-                    }
-                }
-            }
 
-            let best_rgb = if best_idx < patches.len() {
-                let [vi0, vi1, vi2] = patch_vi[best_idx];
+                let best_rgb = if best_idx < patches.len() {
+                    let [vi0, vi1, vi2] = patch_vi[best_idx];
 
-                // Barycentric weights for the three vertices.
-                //
-                // Natural winding (v0, v1, v2): u -> v1, v -> v2, 1-u-v -> v0.
-                // Flipped winding  (v2, v1, v0): MT's "v1" is original v1
-                // (unchanged), "v2" is original v0, "v0" is original v2.
-                // So: u -> vi1, v -> vi0, 1-u-v -> vi2.
-                let (w0, w1, w2) = if best_flip {
-                    (best_v, best_u, 1.0 - best_u - best_v)
+                    // Barycentric weights for the three vertices.
+                    //
+                    // Natural winding (v0, v1, v2): u -> v1, v -> v2, 1-u-v -> v0.
+                    // Flipped winding  (v2, v1, v0): MT's "v1" is original v1
+                    // (unchanged), "v2" is original v0, "v0" is original v2.
+                    // So: u -> vi1, v -> vi0, 1-u-v -> vi2.
+                    let (w0, w1, w2) = if best_flip {
+                        (best_v, best_u, 1.0 - best_u - best_v)
+                    } else {
+                        (1.0 - best_u - best_v, best_u, best_v)
+                    };
+
+                    let r0 = vert_rad[vi0];
+                    let r1 = vert_rad[vi1];
+                    let r2 = vert_rad[vi2];
+                    [
+                        w0 * r0[0] + w1 * r1[0] + w2 * r2[0],
+                        w0 * r0[1] + w1 * r1[1] + w2 * r2[1],
+                        w0 * r0[2] + w1 * r1[2] + w2 * r2[2],
+                    ]
                 } else {
-                    (1.0 - best_u - best_v, best_u, best_v)
+                    [0.0f32; 3]
                 };
 
-                let r0 = vert_rad[vi0];
-                let r1 = vert_rad[vi1];
-                let r2 = vert_rad[vi2];
-                [
-                    w0 * r0[0] + w1 * r1[0] + w2 * r2[0],
-                    w0 * r0[1] + w1 * r1[1] + w2 * r2[1],
-                    w0 * r0[2] + w1 * r1[2] + w2 * r2[2],
-                ]
-            } else {
-                [0.0f32; 3]
-            };
+                let [r, g, b] = to_srgb(best_rgb, white);
+                let base = (px * 3) as usize;
+                row_buf[base]     = r;
+                row_buf[base + 1] = g;
+                row_buf[base + 2] = b;
+            }
 
-            let [r, g, b] = to_srgb(best_rgb, white);
-            img.put_pixel(px, py, Rgb([r, g, b]));
-        }
+            // Progress reporting: print every 64 completed rows.
+            let done = rows_done.fetch_add(1, Ordering::Relaxed) + 1;
+            if done % 64 == 0 || done == height {
+                eprintln!("  {done}/{height} rows done");
+            }
+        });
 
-        if py % 64 == 0 {
-            eprintln!("  row {py}/{height}");
-        }
-    }
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(width, height, pixels)
+            .expect("pixel buffer dimensions match image size");
 
     img.save(output_path)
         .map_err(|e| anyhow::anyhow!("saving PNG: {e}"))?;

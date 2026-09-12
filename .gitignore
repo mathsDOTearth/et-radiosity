@@ -2,6 +2,7 @@
 ff-kernel/target
 Cargo.lock
 ff-kernel/Cargo.lock
+/output.png
 
 # Artefacts copied to the repo root during manual deploy/debug.
 /et-radiosity

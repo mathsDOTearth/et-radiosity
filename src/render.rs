@@ -139,23 +139,65 @@ pub fn render_to_png(
         for px in 0..width {
             let rd = camera.ray_dir(px, py);
 
+            // Pass 1: find the nearest hit patch.
             let mut best_t   = f32::INFINITY;
-            let mut best_rgb = [0.0f32; 3];
+            let mut best_idx = usize::MAX;
 
-            for (patch, &radiosity) in patches.iter().zip(radiosities.iter()) {
-                // Test both windings: the OBJ normals point inward (into scene
-                // interior). Moller-Trumbore is winding-dependent; testing the
-                // reverse winding handles back-face hits for patches whose
-                // normal faces away from the camera.
+            for (i, patch) in patches.iter().enumerate() {
+                // Test both windings: OBJ normals point inward; the reverse
+                // winding catches patches whose normal faces away from the eye.
                 let t = moller_trumbore(ro, rd, patch.v0, patch.v1, patch.v2)
                     .or_else(|| moller_trumbore(ro, rd, patch.v2, patch.v1, patch.v0));
-                if let Some(t) = t {
-                    if t < best_t {
-                        best_t   = t;
-                        best_rgb = radiosity;
-                    }
+                if let Some(t) = t && t < best_t {
+                    best_t   = t;
+                    best_idx = i;
                 }
             }
+
+            // Pass 2: inverse-distance-weighted blend of coplanar nearby
+            // patches. Eliminates the hard step at patch boundaries without
+            // altering patch count or device computation.
+            //
+            // Radius (0.3 m) covers a 3x3 neighbourhood at 0.1 m patch
+            // spacing. The minimum clamp on d^2 prevents division divergence
+            // when the hit point coincides with a patch centroid.
+            let best_rgb = if best_idx < patches.len() {
+                let hit_p = [
+                    ro[0] + best_t * rd[0],
+                    ro[1] + best_t * rd[1],
+                    ro[2] + best_t * rd[2],
+                ];
+                let hit_n = patches[best_idx].abi.normal;
+
+                // Clamp: (patch_size/4)^2 with patch_size = 0.1 m.
+                const EPS_D2:  f32 = 6.25e-4;
+                // Cutoff: (3 * patch_size)^2.
+                const R_MAX_SQ: f32 = 9.0e-2;
+
+                let mut w_sum = 0.0f32;
+                let mut rgb   = [0.0f32; 3];
+
+                for (patch, &rad) in patches.iter().zip(radiosities.iter()) {
+                    // Reject patches on different surfaces.
+                    if dot3(patch.abi.normal, hit_n) < 0.98 { continue; }
+                    let dp = sub3(patch.abi.centroid, hit_p);
+                    let d2 = dot3(dp, dp);
+                    if d2 > R_MAX_SQ { continue; }
+                    let w = 1.0 / (d2 + EPS_D2);
+                    w_sum    += w;
+                    rgb[0]   += w * rad[0];
+                    rgb[1]   += w * rad[1];
+                    rgb[2]   += w * rad[2];
+                }
+
+                if w_sum > 0.0 {
+                    [rgb[0] / w_sum, rgb[1] / w_sum, rgb[2] / w_sum]
+                } else {
+                    radiosities[best_idx]
+                }
+            } else {
+                [0.0f32; 3]
+            };
 
             let [r, g, b] = to_srgb(best_rgb, white);
             img.put_pixel(px, py, Rgb([r, g, b]));

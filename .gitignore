@@ -1,2 +1,8 @@
 /target
+ff-kernel/target
 Cargo.lock
+ff-kernel/Cargo.lock
+
+# Artefacts copied to the repo root during manual deploy/debug.
+/et-radiosity
+/ff-kernel.elf

@@ -5,8 +5,16 @@
 //! primary ray; the closest hit determines the pixel colour. No anti-aliasing
 //! is performed (one sample per pixel is standard for a POC).
 //!
+//! Gouraud shading: a per-vertex radiosity is precomputed by averaging the
+//! radiosity of all patches incident on each unique vertex. The Moller-Trumbore
+//! barycentric coordinates are used to interpolate those vertex values across
+//! each hit triangle, eliminating the hard step artefact at patch boundaries
+//! without altering the radiosity solve or device compute time.
+//!
 //! Tone mapping uses the extended Reinhard operator. Gamma correction uses the
 //! standard sRGB transfer function.
+
+use std::collections::HashMap;
 
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
@@ -58,15 +66,16 @@ impl Camera {
 // Moller-Trumbore ray-triangle intersection
 // ---------------------------------------------------------------------------
 
-/// Returns the intersection distance `t > 0` for a ray `(ro, rd)` against
-/// the triangle `(v0, v1, v2)`, or `None` on a miss.
+/// Returns `(t, u, v)` for a ray `(ro, rd)` against the triangle `(v0, v1,
+/// v2)`, or `None` on a miss.  The barycentric weight for `v0` is `1-u-v`,
+/// for `v1` is `u`, and for `v2` is `v`.
 fn moller_trumbore(
     ro: [f32; 3],
     rd: [f32; 3],
     v0: [f32; 3],
     v1: [f32; 3],
     v2: [f32; 3],
-) -> Option<f32> {
+) -> Option<(f32, f32, f32)> {
     let e1 = sub3(v1, v0);
     let e2 = sub3(v2, v0);
     let h  = cross3(rd, e2);
@@ -83,7 +92,71 @@ fn moller_trumbore(
     if v < 0.0 || u + v > 1.0 { return None; }
 
     let t = f * dot3(e2, q);
-    if t > 1.0e-4 { Some(t) } else { None }
+    if t > 1.0e-4 { Some((t, u, v)) } else { None }
+}
+
+// ---------------------------------------------------------------------------
+// Per-vertex radiosity (Gouraud shading precomputation)
+// ---------------------------------------------------------------------------
+
+/// Vertex index triple per patch: `[vi0, vi1, vi2]` for `patch.v0/v1/v2`.
+type PatchVerts = [usize; 3];
+
+/// Deduplicates triangle vertices by position (1 mm quantisation) and
+/// computes a per-vertex radiosity as the average of all incident patches.
+///
+/// Returns `(vertex_radiosity, patch_vert_indices)`.  `vertex_radiosity[vi]`
+/// is the radiosity attributed to the unique vertex at index `vi`; indexing
+/// it from the barycentric coordinates returned by `moller_trumbore` gives
+/// smooth Gouraud-shaded colour at every rendered pixel.
+fn build_vertex_radiosity(
+    patches:     &[ScenePatch],
+    radiosities: &[[f32; 3]],
+) -> (Vec<[f32; 3]>, Vec<PatchVerts>) {
+    // 1 mm quantisation: vertices within 1 mm of each other merge.
+    const GRID: f32 = 1.0e-3;
+
+    let mut key_to_vi: HashMap<(i32, i32, i32), usize> = HashMap::new();
+    let mut vert_acc:  Vec<[f64; 3]> = Vec::new();  // f64 accumulator avoids
+    let mut vert_cnt:  Vec<u32>      = Vec::new();  // cancellation for bright scenes
+    let mut patch_vi:  Vec<PatchVerts> = Vec::with_capacity(patches.len());
+
+    let quantize = |x: f32| -> i32 { (x / GRID).round() as i32 };
+
+    for (pi, patch) in patches.iter().enumerate() {
+        let rad = radiosities[pi];
+        let mut idx = [0usize; 3];
+
+        for (j, &v) in [patch.v0, patch.v1, patch.v2].iter().enumerate() {
+            let key = (quantize(v[0]), quantize(v[1]), quantize(v[2]));
+            let vi  = *key_to_vi.entry(key).or_insert_with(|| {
+                let i = vert_acc.len();
+                vert_acc.push([0.0; 3]);
+                vert_cnt.push(0);
+                i
+            });
+            vert_acc[vi][0] += rad[0] as f64;
+            vert_acc[vi][1] += rad[1] as f64;
+            vert_acc[vi][2] += rad[2] as f64;
+            vert_cnt[vi]    += 1;
+            idx[j] = vi;
+        }
+
+        patch_vi.push(idx);
+    }
+
+    let vert_rad: Vec<[f32; 3]> = vert_acc.iter().zip(vert_cnt.iter())
+        .map(|(sum, &c)| {
+            if c > 0 {
+                let f = 1.0 / c as f64;
+                [(sum[0]*f) as f32, (sum[1]*f) as f32, (sum[2]*f) as f32]
+            } else {
+                [0.0; 3]
+            }
+        })
+        .collect();
+
+    (vert_rad, patch_vi)
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +194,10 @@ pub fn render_to_png(
     assert_eq!(patches.len(), radiosities.len());
     eprintln!("Render: {width}x{height}, {} patches...", patches.len());
 
+    // Precompute Gouraud vertex radiosity.
+    let (vert_rad, patch_vi) = build_vertex_radiosity(patches, radiosities);
+    eprintln!("  {} unique vertices (Gouraud shading)", vert_rad.len());
+
     let camera = Camera::cornell_default(width, height);
 
     // White-point from scene luminance maximum (Rec. 709 coefficients).
@@ -133,68 +210,66 @@ pub fn render_to_png(
     let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(width, height);
 
     for py in 0..height {
-        let rd = camera.ray_dir(0, py); // direction for px=0; overridden per pixel
-        let _ = rd; // computed per pixel below
-
         for px in 0..width {
             let rd = camera.ray_dir(px, py);
 
-            // Pass 1: find the nearest hit patch.
-            let mut best_t   = f32::INFINITY;
-            let mut best_idx = usize::MAX;
+            // Find the nearest hit, recording hit-triangle index and the
+            // Moller-Trumbore barycentric coordinates (u, v).
+            let mut best_t    = f32::INFINITY;
+            let mut best_idx  = usize::MAX;
+            let mut best_u    = 0.0f32;
+            let mut best_v    = 0.0f32;
+            // Indicates the reverse-winding test produced the best hit.
+            let mut best_flip = false;
 
             for (i, patch) in patches.iter().enumerate() {
-                // Test both windings: OBJ normals point inward; the reverse
-                // winding catches patches whose normal faces away from the eye.
-                let t = moller_trumbore(ro, rd, patch.v0, patch.v1, patch.v2)
-                    .or_else(|| moller_trumbore(ro, rd, patch.v2, patch.v1, patch.v0));
-                if let Some(t) = t && t < best_t {
-                    best_t   = t;
-                    best_idx = i;
+                // Test the triangle's natural winding first.
+                if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v0, patch.v1, patch.v2) {
+                    if t < best_t {
+                        best_t    = t;
+                        best_idx  = i;
+                        best_u    = u;
+                        best_v    = v;
+                        best_flip = false;
+                    }
+                }
+                // Test the reverse winding: the OBJ normals point inward, so
+                // patches whose normal faces away from the eye are hit only via
+                // this path.
+                if let Some((t, u, v)) = moller_trumbore(ro, rd, patch.v2, patch.v1, patch.v0) {
+                    if t < best_t {
+                        best_t    = t;
+                        best_idx  = i;
+                        best_u    = u;
+                        best_v    = v;
+                        best_flip = true;
+                    }
                 }
             }
 
-            // Pass 2: inverse-distance-weighted blend of coplanar nearby
-            // patches. Eliminates the hard step at patch boundaries without
-            // altering patch count or device computation.
-            //
-            // Radius (0.3 m) covers a 3x3 neighbourhood at 0.1 m patch
-            // spacing. The minimum clamp on d^2 prevents division divergence
-            // when the hit point coincides with a patch centroid.
             let best_rgb = if best_idx < patches.len() {
-                let hit_p = [
-                    ro[0] + best_t * rd[0],
-                    ro[1] + best_t * rd[1],
-                    ro[2] + best_t * rd[2],
-                ];
-                let hit_n = patches[best_idx].abi.normal;
+                let [vi0, vi1, vi2] = patch_vi[best_idx];
 
-                // Clamp: (patch_size/4)^2 with patch_size = 0.1 m.
-                const EPS_D2:  f32 = 6.25e-4;
-                // Cutoff: (3 * patch_size)^2.
-                const R_MAX_SQ: f32 = 9.0e-2;
-
-                let mut w_sum = 0.0f32;
-                let mut rgb   = [0.0f32; 3];
-
-                for (patch, &rad) in patches.iter().zip(radiosities.iter()) {
-                    // Reject patches on different surfaces.
-                    if dot3(patch.abi.normal, hit_n) < 0.98 { continue; }
-                    let dp = sub3(patch.abi.centroid, hit_p);
-                    let d2 = dot3(dp, dp);
-                    if d2 > R_MAX_SQ { continue; }
-                    let w = 1.0 / (d2 + EPS_D2);
-                    w_sum    += w;
-                    rgb[0]   += w * rad[0];
-                    rgb[1]   += w * rad[1];
-                    rgb[2]   += w * rad[2];
-                }
-
-                if w_sum > 0.0 {
-                    [rgb[0] / w_sum, rgb[1] / w_sum, rgb[2] / w_sum]
+                // Barycentric weights for the three vertices.
+                //
+                // Natural winding (v0, v1, v2): u -> v1, v -> v2, 1-u-v -> v0.
+                // Flipped winding  (v2, v1, v0): MT's "v1" is original v1
+                // (unchanged), "v2" is original v0, "v0" is original v2.
+                // So: u -> vi1, v -> vi0, 1-u-v -> vi2.
+                let (w0, w1, w2) = if best_flip {
+                    (best_v, best_u, 1.0 - best_u - best_v)
                 } else {
-                    radiosities[best_idx]
-                }
+                    (1.0 - best_u - best_v, best_u, best_v)
+                };
+
+                let r0 = vert_rad[vi0];
+                let r1 = vert_rad[vi1];
+                let r2 = vert_rad[vi2];
+                [
+                    w0 * r0[0] + w1 * r1[0] + w2 * r2[0],
+                    w0 * r0[1] + w1 * r1[1] + w2 * r2[1],
+                    w0 * r0[2] + w1 * r1[2] + w2 * r2[2],
+                ]
             } else {
                 [0.0f32; 3]
             };

@@ -102,7 +102,7 @@ fn moller_trumbore(
 // ---------------------------------------------------------------------------
 
 /// Vertex index triple per patch: `[vi0, vi1, vi2]` for `patch.v0/v1/v2`.
-type PatchVerts = [usize; 3];
+pub type PatchVerts = [usize; 3];
 
 /// Deduplicates triangle vertices by position (1 mm quantisation) and
 /// computes a per-vertex radiosity as the average of all incident patches.
@@ -111,7 +111,7 @@ type PatchVerts = [usize; 3];
 /// is the radiosity attributed to the unique vertex at index `vi`; indexing
 /// it from the barycentric coordinates returned by `moller_trumbore` gives
 /// smooth Gouraud-shaded colour at every rendered pixel.
-fn build_vertex_radiosity(
+pub fn build_vertex_radiosity(
     patches:     &[ScenePatch],
     radiosities: &[[f32; 3]],
 ) -> (Vec<[f32; 3]>, Vec<PatchVerts>) {

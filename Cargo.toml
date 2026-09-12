@@ -10,7 +10,7 @@ authors = ["mathsDOTearth"]
 # attempting to build it.
 [workspace]
 members  = ["radiosity-abi", "xtask"]
-exclude  = ["ff-kernel"]
+exclude  = ["ff-kernel", "render-kernel"]
 
 [dependencies]
 et-rs    = "0.5"

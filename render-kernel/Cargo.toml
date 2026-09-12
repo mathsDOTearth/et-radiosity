@@ -1,0 +1,24 @@
+[package]
+name = "render-kernel"
+version = "0.1.0"
+edition = "2024"
+description = "ET-SoC-1 device kernel: parallel ray-cast render of the radiosity solution"
+
+[[bin]]
+name = "render-kernel"
+path = "src/main.rs"
+
+[dependencies]
+et-k-rs  = "0.5"
+et-abi   = "0.5"
+# radiosity-abi must also be no_std; the kernel depends on it for PatchGeom
+# and RenderArgs without pulling in any host-side crates.
+radiosity-abi = { path = "../radiosity-abi" }
+
+[profile.release]
+panic     = "abort"
+opt-level = "s"   # optimise for size: reduces I-cache pressure on the ET-SoC-1
+lto       = true
+
+[profile.dev]
+panic = "abort"

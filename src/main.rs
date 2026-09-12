@@ -77,6 +77,12 @@ struct Args {
     /// trace buffer on the device.
     #[arg(long)]
     trace: bool,
+
+    /// Path to the render-kernel ELF binary (built from render-kernel/).
+    /// When provided, ray-casting is performed on the ET-SoC-1 device rather
+    /// than on the host CPU, and the render timing line reflects device time.
+    #[arg(long, short = 'r')]
+    render_kernel: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,28 +143,63 @@ fn main() -> Result<()> {
 
     // --- Render to PNG ---
     let t_render_start = Instant::now();
-    render::render_to_png(
-        &scene.patches,
-        &radiosities,
-        args.width,
-        args.height,
-        &args.output,
-    )?;
-    let render_elapsed = t_render_start.elapsed();
+    let rk_kernel_elapsed: Option<Duration>;
 
-    let total_elapsed = t_start.elapsed();
+    if let Some(rk_path) = &args.render_kernel {
+        // Device-side ray-cast path.
+        let rk_elf = std::fs::read(rk_path)
+            .with_context(|| format!("reading render-kernel ELF from {}", rk_path.display()))?;
+        eprintln!("Render kernel: {} ({} bytes)", rk_path.display(), rk_elf.len());
+
+        let (pixels, rk_elapsed) = device_ops::render_on_device(
+            &device,
+            &rk_elf,
+            &scene.patches,
+            &radiosities,
+            args.width,
+            args.height,
+        )?;
+        rk_kernel_elapsed = Some(rk_elapsed);
+
+        let img = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
+            args.width, args.height, pixels,
+        ).expect("pixel buffer dimensions match image size");
+        img.save(&args.output)
+            .map_err(|e| anyhow::anyhow!("saving PNG: {e}"))?;
+        eprintln!("  saved to {}", args.output.display());
+    } else {
+        // Host CPU ray-cast path.
+        rk_kernel_elapsed = None;
+        render::render_to_png(
+            &scene.patches,
+            &radiosities,
+            args.width,
+            args.height,
+            &args.output,
+        )?;
+    }
+
+    let render_elapsed = t_render_start.elapsed();
+    let total_elapsed  = t_start.elapsed();
 
     // --- Timing summary ---
     // Columns: phase, seconds.
-    // "On-card kernel" is the wall-clock time around launch_spmd (device
-    // compute + PCIe command round-trip, excluding DMA).
+    // "On-card FF kernel" is the wall-clock time around launch_spmd for the
+    // form-factor kernel (device compute + PCIe round-trip, excluding DMA).
     // "Device total" additionally includes DMA upload and download.
+    // "On-card render kernel" (when present) is the analogous measurement for
+    // the render kernel launch.
     eprintln!("\n=== Timing (seconds) ===");
     eprintln!("  Load (ELF + OBJ):     {:8.3}", t_after_load.duration_since(t_start).as_secs_f64());
-    eprintln!("  Device total:         {:8.3}  (DMA upload + kernel + DMA download)", device_elapsed.as_secs_f64());
-    eprintln!("    On-card kernel:     {:8.3}  (launch_spmd wall clock)", kernel_elapsed.as_secs_f64());
+    eprintln!("  Device total (FF):    {:8.3}  (DMA upload + kernel + DMA download)", device_elapsed.as_secs_f64());
+    eprintln!("    On-card FF kernel:  {:8.3}  (launch_spmd wall clock)", kernel_elapsed.as_secs_f64());
     eprintln!("  Radiosity solve:      {:8.3}", solve_elapsed.as_secs_f64());
-    eprintln!("  Render:               {:8.3}", render_elapsed.as_secs_f64());
+    if let Some(rke) = rk_kernel_elapsed {
+        eprintln!("  Render (device):      {:8.3}  (DMA upload + kernel + DMA download)", render_elapsed.as_secs_f64());
+        eprintln!("    On-card render:     {:8.3}  (launch_spmd wall clock)", rke.as_secs_f64());
+    } else {
+        eprintln!("  Render (host CPU):    {:8.3}", render_elapsed.as_secs_f64());
+    }
     eprintln!("  -----");
     eprintln!("  Total:                {:8.3}", total_elapsed.as_secs_f64());
 

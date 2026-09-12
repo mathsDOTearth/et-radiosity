@@ -7,3 +7,6 @@ ff-kernel/Cargo.lock
 # Artefacts copied to the repo root during manual deploy/debug.
 /et-radiosity
 /ff-kernel.elf
+
+# Bug reports (shared with et-rs team separately; not part of the commit history).
+/et-bug.md

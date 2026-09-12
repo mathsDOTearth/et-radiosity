@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use et_soc1::{Device, IoctlTransport, TraceConfig};
 use et_soc1::trace::TraceBuffer;
-use radiosity_abi::FormFactorArgs;
+use radiosity_abi::{FormFactorArgs, PatchGeom, RenderArgs};
 
+use crate::render::build_vertex_radiosity;
 use crate::scene::{Scene, ScenePatch};
 
 const TRACE_BUFFER_BYTES: u64 = 4096 * 64;
@@ -229,6 +230,148 @@ pub fn solve_radiosity(
 
     eprintln!("  solve complete");
     b
+}
+
+// ---------------------------------------------------------------------------
+// Render kernel launch
+// ---------------------------------------------------------------------------
+
+/// Uploads radiosity data to the device, launches the render kernel, and
+/// returns the downloaded RGB pixel buffer (`width * height * 3` bytes,
+/// row-major) together with the host-measured wall-clock duration of the
+/// `launch_spmd` call.
+///
+/// The render kernel performs Moller-Trumbore ray-triangle intersection
+/// against the patch geometry for every output pixel, applies
+/// Gouraud-interpolated radiosity, Reinhard tone mapping, and sRGB gamma,
+/// then writes the result to device DRAM. The host downloads the finished
+/// pixel buffer after the kernel completes.
+///
+/// Camera convention matches the host-side `Camera::cornell_default`: eye at
+/// (0.5, 0.5, -1.4), 45-degree vertical FOV, looking toward +Z.
+pub fn render_on_device(
+    device:      &Device<IoctlTransport>,
+    kernel_elf:  &[u8],
+    patches:     &[ScenePatch],
+    radiosities: &[[f32; 3]],
+    width:       u32,
+    height:      u32,
+) -> Result<(Vec<u8>, Duration)> {
+    let n = patches.len();
+    eprintln!(
+        "Device render: {width}x{height}, {n} patches..."
+    );
+
+    let topo       = device.topology().context("querying topology")?;
+    let shire_mask = topo.shire_mask;
+    let n_harts    = topo.num_harts();
+    eprintln!(
+        "  {} shires ({shire_mask:#x}), {} harts total",
+        topo.num_shires(), n_harts,
+    );
+
+    let kernel = device.load_kernel(kernel_elf)
+        .context("loading render-kernel ELF")?;
+
+    // --- Build Gouraud vertex radiosity (same algorithm as host render) ---
+    let (vert_rad, patch_vi_usize) = build_vertex_radiosity(patches, radiosities);
+    eprintln!("  {} unique vertices (Gouraud shading)", vert_rad.len());
+
+    // Convert patch vertex indices from usize to u32 for device upload.
+    let patch_vi: Vec<[u32; 3]> = patch_vi_usize
+        .iter()
+        .map(|&[a, b, c]| [a as u32, b as u32, c as u32])
+        .collect();
+
+    // --- Build patch geometry array ---
+    let patch_geom: Vec<PatchGeom> = patches
+        .iter()
+        .map(|p| PatchGeom {
+            v0: p.v0, _p0: 0.0,
+            v1: p.v1, _p1: 0.0,
+            v2: p.v2, _p2: 0.0,
+        })
+        .collect();
+
+    // --- Upload patch geometry ---
+    let geom_bytes  = pod_as_bytes(&patch_geom);
+    let geom_region = device.alloc(geom_bytes.len() as u64)
+        .context("alloc patch geometry array")?;
+    device.memcpy_h2d(geom_bytes, geom_region.addr)
+        .context("DMA patch geometry array")?;
+
+    // --- Upload per-vertex radiosity ---
+    let vrad_bytes  = pod_as_bytes(&vert_rad);
+    let vrad_region = device.alloc(vrad_bytes.len() as u64)
+        .context("alloc vertex radiosity array")?;
+    device.memcpy_h2d(vrad_bytes, vrad_region.addr)
+        .context("DMA vertex radiosity array")?;
+
+    // --- Upload patch vertex index triples ---
+    let vi_bytes  = pod_as_bytes(&patch_vi);
+    let vi_region = device.alloc(vi_bytes.len() as u64)
+        .context("alloc patch vertex index array")?;
+    device.memcpy_h2d(vi_bytes, vi_region.addr)
+        .context("DMA patch vertex index array")?;
+
+    // --- Upload camera parameters ---
+    // Layout: eye[3], fwd[3], right[3], up[3], tan_half_fov, aspect -- 14 f32.
+    let aspect       = width as f32 / height as f32;
+    let tan_half_fov = (22.5f32).to_radians().tan();
+    let cam: [f32; 14] = [
+        0.5, 0.5, -1.4,   // eye
+        0.0, 0.0,  1.0,   // fwd
+        1.0, 0.0,  0.0,   // right
+        0.0, 1.0,  0.0,   // up
+        tan_half_fov,
+        aspect,
+    ];
+    let cam_bytes  = pod_as_bytes(&cam);
+    let cam_region = device.alloc(cam_bytes.len() as u64)
+        .context("alloc camera parameter buffer")?;
+    device.memcpy_h2d(cam_bytes, cam_region.addr)
+        .context("DMA camera parameters")?;
+
+    // --- Compute white-point (Reinhard, Rec. 709 luminance) ---
+    let white = radiosities
+        .iter()
+        .map(|&[r, g, b]| 0.2126 * r + 0.7152 * g + 0.0722 * b)
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+
+    // --- Allocate pixel output buffer ---
+    let pixel_bytes  = (width as u64) * (height as u64) * 3;
+    let pixel_region = device.alloc(pixel_bytes)
+        .context("alloc pixel buffer")?;
+
+    // --- Build and launch RenderArgs ---
+    let args = RenderArgs {
+        patch_geom_addr: geom_region.addr,
+        vert_rad_addr:   vrad_region.addr,
+        patch_vi_addr:   vi_region.addr,
+        pixels_addr:     pixel_region.addr,
+        camera_addr:     cam_region.addr,
+        white,
+        width,
+        height,
+        n_patches:       n as u32,
+        n_verts:         vert_rad.len() as u32,
+        n_harts,
+        _pad:            0,
+    };
+
+    let t_kernel = Instant::now();
+    device.launch_spmd(&kernel, shire_mask, &args)
+        .context("launch render-kernel")?;
+    let kernel_elapsed = t_kernel.elapsed();
+
+    // --- Download pixel buffer ---
+    let mut pixels_raw = vec![0u8; pixel_bytes as usize];
+    device.memcpy_d2h(pixel_region.addr, &mut pixels_raw)
+        .context("download pixel buffer")?;
+
+    eprintln!("  pixel buffer downloaded ({} bytes)", pixels_raw.len());
+    Ok((pixels_raw, kernel_elapsed))
 }
 
 // ---------------------------------------------------------------------------

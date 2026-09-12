@@ -107,3 +107,89 @@ pub struct FormFactorArgs {
 // the struct contains no padding, and every possible bit pattern is a valid
 // (if semantically meaningless) value -- satisfying the `DeviceArgs` contract.
 unsafe impl DeviceArgs for FormFactorArgs {}
+
+// ---------------------------------------------------------------------------
+// Patch vertex geometry (render kernel)
+// ---------------------------------------------------------------------------
+
+/// Vertex positions of a patch triangle, for upload to the render kernel.
+///
+/// Separate from [`Patch`] so the form-factor kernel ABI is unchanged.
+/// Layout: 48 bytes; each vertex group padded to 16 bytes, matching
+/// [`OccluderTri`] and maintaining 16-byte alignment within device DRAM.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct PatchGeom {
+    pub v0:  [f32; 3],
+    pub _p0: f32,
+    pub v1:  [f32; 3],
+    pub _p1: f32,
+    pub v2:  [f32; 3],
+    pub _p2: f32,
+}
+
+// ---------------------------------------------------------------------------
+// Render kernel launch arguments
+// ---------------------------------------------------------------------------
+
+/// Arguments passed to the render kernel.
+///
+/// The host uploads patch vertex geometry, per-vertex radiosity, and per-patch
+/// vertex index triples before launching. The kernel writes a packed RGB byte
+/// buffer (width * height * 3 bytes, row-major) to `pixels_addr`.
+///
+/// Layout (all fields at natural alignment, no implicit padding):
+///
+/// ```text
+/// offset  0: patch_geom_addr  -- device address of PatchGeom[n_patches]
+/// offset  8: vert_rad_addr    -- device address of [f32; 3][n_verts]
+/// offset 16: patch_vi_addr    -- device address of [u32; 3][n_patches]
+/// offset 24: pixels_addr      -- device address of u8[width * height * 3]
+/// offset 32: camera_addr      -- device address of f32[14]
+/// offset 40: white
+/// offset 44: width
+/// offset 48: height
+/// offset 52: n_patches
+/// offset 56: n_verts
+/// offset 60: n_harts
+/// offset 64: _pad
+/// ```
+///
+/// Camera buffer at `camera_addr` holds 14 consecutive f32 values:
+/// eye[3], fwd[3], right[3], up[3], tan_half_fov, aspect.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct RenderArgs {
+    /// Device address of the vertex geometry array (`PatchGeom[n_patches]`).
+    pub patch_geom_addr: u64,
+    /// Device address of per-vertex radiosity (`[f32; 3][n_verts]`).
+    pub vert_rad_addr:   u64,
+    /// Device address of patch vertex index triples (`[u32; 3][n_patches]`).
+    pub patch_vi_addr:   u64,
+    /// Device address of the output pixel buffer (`u8[width * height * 3]`).
+    pub pixels_addr:     u64,
+    /// Device address of camera parameters (`f32[14]`): eye, fwd, right, up,
+    /// tan_half_fov, aspect.
+    pub camera_addr:     u64,
+    /// Reinhard extended white-point (pre-computed on host as scene luminance
+    /// maximum under Rec. 709 coefficients, clamped to at least 1.0).
+    pub white:           f32,
+    /// Output image width in pixels.
+    pub width:           u32,
+    /// Output image height in pixels.
+    pub height:          u32,
+    /// Number of patches.
+    pub n_patches:       u32,
+    /// Number of unique vertices in the vertex radiosity array.
+    pub n_verts:         u32,
+    /// Total hart count (from topology query).
+    pub n_harts:         u32,
+    /// Explicit padding to maintain size as a multiple of 8 bytes.
+    pub _pad:            u32,
+}
+
+// SAFETY: `RenderArgs` is `#[repr(C)]`, contains no implicit padding, and
+// every field is a fixed-width numeric type for which every bit pattern is a
+// valid (if semantically meaningless) value, satisfying the `DeviceArgs`
+// safety contract.
+unsafe impl DeviceArgs for RenderArgs {}

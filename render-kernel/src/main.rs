@@ -280,14 +280,18 @@ fn to_srgb(rgb: [f32; 3], white: f32) -> [u8; 3] {
 /// as `k * (bits(x) - 0x3F80_0000) + 0x3F80_0000`. With `k = 1/2.2 ~
 /// 4545/10000` this avoids all transcendental operations. Error is below 0.5%
 /// across [0, 1], well within 8-bit output resolution.
+///
+/// The shifted quantity is negative for x < 1, so the arithmetic must be
+/// signed throughout: casting to u32/u64 before scaling produces wrap-around
+/// and completely incorrect results.
 #[inline]
 fn pow22(x: f32) -> f32 {
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
-    let bits    = x.to_bits();
-    let shifted = bits.wrapping_sub(0x3F80_0000);
-    let scaled  = (shifted as u64 * 4545 / 10000) as u32;
-    f32::from_bits(scaled.wrapping_add(0x3F80_0000))
+    let bits    = x.to_bits() as i32;
+    let shifted = bits - 0x3F80_0000i32;               // negative for x < 1
+    let scaled  = (shifted as i64 * 4545 / 10000) as i32;
+    f32::from_bits((scaled + 0x3F80_0000i32) as u32)
 }
 
 // ---------------------------------------------------------------------------

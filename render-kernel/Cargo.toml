@@ -9,8 +9,8 @@ name = "render-kernel"
 path = "src/main.rs"
 
 [dependencies]
-et-k-rs  = "0.5"
-et-abi   = "0.5"
+et-k-rs  = "0.6"
+et-abi   = "0.6"
 # radiosity-abi must also be no_std; the kernel depends on it for PatchGeom
 # and RenderArgs without pulling in any host-side crates.
 radiosity-abi = { path = "../radiosity-abi" }

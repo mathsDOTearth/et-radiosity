@@ -13,8 +13,8 @@ members  = ["radiosity-abi", "xtask"]
 exclude  = ["ff-kernel", "render-kernel"]
 
 [dependencies]
-et-rs    = "0.5"
-et-abi   = "0.5"
+et-rs    = "0.6"
+et-abi   = "0.6"
 radiosity-abi = { path = "radiosity-abi" }
 
 anyhow   = "1"

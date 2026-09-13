@@ -57,11 +57,7 @@ pub fn compute_form_factors(
 
     // --- Upload patch array ---
     let abi_patches: Vec<radiosity_abi::Patch> = patches.iter().map(|p| p.abi).collect();
-    let patch_bytes = pod_as_bytes(&abi_patches);
-    let patch_region = device.alloc(patch_bytes.len() as u64)
-        .context("alloc patch array")?;
-    device.memcpy_h2d(patch_bytes, patch_region.addr)
-        .context("DMA patch array")?;
+    let patch_buf = device.upload(&abi_patches).context("upload patch array")?;
 
     // --- Upload occluder triangles in SoA layout ---
     //
@@ -89,17 +85,12 @@ pub fn compute_form_factors(
             soa[7 * n_padded + i] = o.v2[1];
             soa[8 * n_padded + i] = o.v2[2];
         }
-        let soa_bytes = pod_as_bytes(&soa);
-        let region = device.alloc(soa_bytes.len() as u64)
-            .context("alloc SoA occluder array")?;
-        device.memcpy_h2d(soa_bytes, region.addr)
-            .context("DMA SoA occluder array")?;
-        (region.addr, n_occ as u32)
+        let occ_buf = device.upload(&soa).context("upload SoA occluder array")?;
+        (occ_buf.addr(), n_occ as u32)
     };
 
     // --- Allocate form-factor output ---
-    let ff_bytes  = (n * n * 4) as u64;
-    let ff_region = device.alloc(ff_bytes).context("alloc ff matrix")?;
+    let ff_buf = device.alloc_array::<f32>(n * n).context("alloc ff matrix")?;
 
     // --- Trace buffer (optional) ---
     let trace_region = if trace {
@@ -110,8 +101,8 @@ pub fn compute_form_factors(
 
     // --- Launch ---
     let args = FormFactorArgs {
-        patches_addr:   patch_region.addr,
-        ff_matrix_addr: ff_region.addr,
+        patches_addr:   patch_buf.addr(),
+        ff_matrix_addr: ff_buf.addr(),
         occluder_addr:  occ_addr,
         n_patches:      n as u32,
         n_harts,
@@ -150,14 +141,7 @@ pub fn compute_form_factors(
     }
 
     // --- Download form-factor matrix ---
-    let mut ff_raw = vec![0u8; ff_bytes as usize];
-    device.memcpy_d2h(ff_region.addr, &mut ff_raw)
-        .context("download ff matrix")?;
-
-    let mut ff: Vec<f32> = ff_raw
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
+    let mut ff = device.download(&ff_buf).context("download ff matrix")?;
 
     // Normalise each row so that sum_j F[i][j] <= 1 (energy conservation).
     // This is done on the host rather than in the kernel to avoid a store-buffer
@@ -294,25 +278,17 @@ pub fn render_on_device(
         .collect();
 
     // --- Upload patch geometry ---
-    let geom_bytes  = pod_as_bytes(&patch_geom);
-    let geom_region = device.alloc(geom_bytes.len() as u64)
-        .context("alloc patch geometry array")?;
-    device.memcpy_h2d(geom_bytes, geom_region.addr)
-        .context("DMA patch geometry array")?;
+    let geom_buf = device.upload(&patch_geom).context("upload patch geometry")?;
 
     // --- Upload per-vertex radiosity ---
-    let vrad_bytes  = pod_as_bytes(&vert_rad);
-    let vrad_region = device.alloc(vrad_bytes.len() as u64)
-        .context("alloc vertex radiosity array")?;
-    device.memcpy_h2d(vrad_bytes, vrad_region.addr)
-        .context("DMA vertex radiosity array")?;
+    // [f32; 3] has no DevicePod impl (orphan rule); flatten to f32 slice first.
+    let vert_rad_flat: Vec<f32> = vert_rad.iter().flat_map(|&[r, g, b]| [r, g, b]).collect();
+    let vrad_buf = device.upload(&vert_rad_flat).context("upload vertex radiosity")?;
 
     // --- Upload patch vertex index triples ---
-    let vi_bytes  = pod_as_bytes(&patch_vi);
-    let vi_region = device.alloc(vi_bytes.len() as u64)
-        .context("alloc patch vertex index array")?;
-    device.memcpy_h2d(vi_bytes, vi_region.addr)
-        .context("DMA patch vertex index array")?;
+    // [u32; 3] has no DevicePod impl (orphan rule); flatten to u32 slice first.
+    let patch_vi_flat: Vec<u32> = patch_vi.iter().flat_map(|&[a, b, c]| [a, b, c]).collect();
+    let vi_buf = device.upload(&patch_vi_flat).context("upload vertex indices")?;
 
     // --- Upload camera parameters ---
     // Layout: eye[3], fwd[3], right[3], up[3], tan_half_fov, aspect -- 14 f32.
@@ -326,11 +302,7 @@ pub fn render_on_device(
         tan_half_fov,
         aspect,
     ];
-    let cam_bytes  = pod_as_bytes(&cam);
-    let cam_region = device.alloc(cam_bytes.len() as u64)
-        .context("alloc camera parameter buffer")?;
-    device.memcpy_h2d(cam_bytes, cam_region.addr)
-        .context("DMA camera parameters")?;
+    let cam_buf = device.upload(cam.as_slice()).context("upload camera parameters")?;
 
     // --- Compute white-point (Reinhard, Rec. 709 luminance) ---
     let white = radiosities
@@ -340,17 +312,16 @@ pub fn render_on_device(
         .max(1.0);
 
     // --- Allocate pixel output buffer ---
-    let pixel_bytes  = (width as u64) * (height as u64) * 3;
-    let pixel_region = device.alloc(pixel_bytes)
-        .context("alloc pixel buffer")?;
+    let pixel_count = (width as usize) * (height as usize) * 3;
+    let pixel_buf   = device.alloc_array::<u8>(pixel_count).context("alloc pixel buffer")?;
 
     // --- Build and launch RenderArgs ---
     let args = RenderArgs {
-        patch_geom_addr: geom_region.addr,
-        vert_rad_addr:   vrad_region.addr,
-        patch_vi_addr:   vi_region.addr,
-        pixels_addr:     pixel_region.addr,
-        camera_addr:     cam_region.addr,
+        patch_geom_addr: geom_buf.addr(),
+        vert_rad_addr:   vrad_buf.addr(),
+        patch_vi_addr:   vi_buf.addr(),
+        pixels_addr:     pixel_buf.addr(),
+        camera_addr:     cam_buf.addr(),
         white,
         width,
         height,
@@ -366,29 +337,9 @@ pub fn render_on_device(
     let kernel_elapsed = t_kernel.elapsed();
 
     // --- Download pixel buffer ---
-    let mut pixels_raw = vec![0u8; pixel_bytes as usize];
-    device.memcpy_d2h(pixel_region.addr, &mut pixels_raw)
-        .context("download pixel buffer")?;
+    let pixels_raw = device.download(&pixel_buf).context("download pixel buffer")?;
 
     eprintln!("  pixel buffer downloaded ({} bytes)", pixels_raw.len());
     Ok((pixels_raw, kernel_elapsed))
 }
 
-// ---------------------------------------------------------------------------
-// Utility: reinterpret a slice of POD structs as bytes
-// ---------------------------------------------------------------------------
-
-/// Reinterprets a slice of `#[repr(C)]` POD values as a byte slice for DMA.
-///
-/// # Safety
-///
-/// `T` must be a `#[repr(C)]` type with no padding and valid for any bit
-/// pattern (plain-old-data). Callers ensure this through the type constraint.
-fn pod_as_bytes<T: Copy>(data: &[T]) -> &[u8] {
-    unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr().cast::<u8>(),
-            data.len() * core::mem::size_of::<T>(),
-        )
-    }
-}

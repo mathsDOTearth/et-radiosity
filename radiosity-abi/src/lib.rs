@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use et_abi::DeviceArgs;
+use et_abi::{DeviceArgs, DevicePod};
 
 // ---------------------------------------------------------------------------
 // Patch descriptor
@@ -108,6 +108,14 @@ pub struct FormFactorArgs {
 // (if semantically meaningless) value -- satisfying the `DeviceArgs` contract.
 unsafe impl DeviceArgs for FormFactorArgs {}
 
+// SAFETY: `Patch` is `#[repr(C)]`, contains only `f32` fields (no pointers,
+// no padding beyond the explicit `_pad` field), and is valid for any bit pattern.
+unsafe impl DevicePod for Patch {}
+
+// SAFETY: `OccluderTri` is `#[repr(C)]`, contains only `f32` fields (no pointers,
+// no padding beyond the explicit `_pad{0,1,2}` fields), and is valid for any bit pattern.
+unsafe impl DevicePod for OccluderTri {}
+
 // ---------------------------------------------------------------------------
 // Patch vertex geometry (render kernel)
 // ---------------------------------------------------------------------------
@@ -193,3 +201,7 @@ pub struct RenderArgs {
 // valid (if semantically meaningless) value, satisfying the `DeviceArgs`
 // safety contract.
 unsafe impl DeviceArgs for RenderArgs {}
+
+// SAFETY: `PatchGeom` is `#[repr(C)]`, contains only `f32` fields (no pointers,
+// no padding beyond the explicit `_p{0,1,2}` fields), and is valid for any bit pattern.
+unsafe impl DevicePod for PatchGeom {}

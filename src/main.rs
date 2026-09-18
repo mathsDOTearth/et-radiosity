@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use et_soc1::Device;
+use et_soc1::{transport::IoctlTransport, Device};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -85,6 +85,12 @@ struct Args {
     #[arg(long)]
     reset: bool,
 
+    /// Perform a full ETSOC hardware reset before launching any kernel. Closes
+    /// the device node, triggers a firmware restart, and re-opens the device
+    /// (may take up to 30 s). Use when --reset alone does not clear the fault.
+    #[arg(long)]
+    reset_device: bool,
+
     /// Path to the render-kernel ELF binary (built from render-kernel/).
     /// When provided, ray-casting is performed on the ET-SoC-1 device rather
     /// than on the host CPU, and the render timing line reflects device time.
@@ -119,25 +125,32 @@ fn main() -> Result<()> {
     let t_after_load = Instant::now();
 
     // --- Open device ---
-    let device = Device::open(args.device)
+    let raw_device: Device<IoctlTransport> = Device::open(args.device)
         .with_context(|| format!("opening ET-SoC-1 device index {}", args.device))?;
+    raw_device.set_default_launch_timeout(Duration::from_secs(300));
 
-    // Override the 10-second default command-response timeout (et-rs <= 0.5.2
-    // applied this deadline to every device command including load_kernel and
-    // launch_spmd). With the hemisphere filter and all shires active the kernel
-    // completes in well under 2 s at any supported patch size; 300 s is a
-    // conservative ceiling that accommodates DMA transfers and slow paths.
-    device.set_default_launch_timeout(Duration::from_secs(300));
-
-    // --- Optional shire reset ---
+    // --- Optional soft shire reset ---
     // Recovers from a prior kernel crash that left one or more shires in a
-    // faulted state (firmware returns EXCEPTION on the next launch attempt).
+    // faulted state. The device node stays open; firmware is not restarted.
     if args.reset {
-        let topo = device.topology().context("querying topology for reset")?;
+        let topo = raw_device.topology().context("querying topology for reset")?;
         eprintln!("Resetting {} shires ({:#x})...", topo.num_shires(), topo.shire_mask);
-        device.reset_shires(topo.shire_mask).context("reset_shires")?;
+        raw_device.reset_shires(topo.shire_mask).context("reset_shires")?;
         eprintln!("  shires reset -- OK");
     }
+
+    // --- Optional full ETSOC hardware reset ---
+    // Consumes the device, triggers a firmware restart, and re-opens the node.
+    // Use when --reset alone does not unblock the device (up to 30 s).
+    let device: Device<IoctlTransport> = if args.reset_device {
+        eprintln!("Full ETSOC hardware reset (up to 30 s)...");
+        let d = raw_device.reset_device().context("reset_device")?;
+        d.set_default_launch_timeout(Duration::from_secs(300));
+        eprintln!("  device re-opened -- OK");
+        d
+    } else {
+        raw_device
+    };
 
     // --- Compute form-factor matrix on device ---
     // compute_form_factors returns the matrix and the wall-clock duration of

@@ -28,10 +28,11 @@ const TRACE_BUFFER_BYTES: u64 = 4096 * 64;
 /// Moller-Trumbore shadow test for every patch pair, producing correct binary
 /// visibility and hence shadows in the radiosity solution.
 pub fn compute_form_factors(
-    device:     &Device<IoctlTransport>,
-    kernel_elf: &[u8],
-    scene:      &Scene,
-    trace:      bool,
+    device:      &Device<IoctlTransport>,
+    kernel_elf:  &[u8],
+    scene:       &Scene,
+    trace:       bool,
+    shire_mask_override: Option<u64>,
 ) -> Result<(Vec<f32>, Duration)> {
     let patches   = &scene.patches;
     let occluders = &scene.occluders;
@@ -43,14 +44,13 @@ pub fn compute_form_factors(
     );
 
     let topo       = device.topology().context("querying topology")?;
-    // Use all available compute shires, not just the first. The kernel-side
-    // Grid::new(n_harts) uses the global hardware hart ID (CSR 0xCD0), so
-    // hart IDs are unique across shires and row partitioning is correct.
-    let shire_mask = topo.shire_mask;
-    let n_harts    = topo.num_harts();
+    // Apply the shire mask override when provided (e.g. to exclude a faulty
+    // shire); otherwise use all compute-capable shires from the topology.
+    let shire_mask = shire_mask_override.unwrap_or(topo.shire_mask);
+    let n_harts    = (shire_mask.count_ones()) * topo.harts_per_shire;
     eprintln!(
         "  {} shires ({shire_mask:#x}), {} harts total",
-        topo.num_shires(), n_harts,
+        shire_mask.count_ones(), n_harts,
     );
 
     let kernel = device.load_kernel(kernel_elf).context("loading ff-kernel ELF")?;
@@ -240,6 +240,7 @@ pub fn render_on_device(
     radiosities: &[[f32; 3]],
     width:       u32,
     height:      u32,
+    shire_mask_override: Option<u64>,
 ) -> Result<(Vec<u8>, Duration)> {
     let n = patches.len();
     eprintln!(
@@ -247,11 +248,11 @@ pub fn render_on_device(
     );
 
     let topo       = device.topology().context("querying topology")?;
-    let shire_mask = topo.shire_mask;
-    let n_harts    = topo.num_harts();
+    let shire_mask = shire_mask_override.unwrap_or(topo.shire_mask);
+    let n_harts    = (shire_mask.count_ones()) * topo.harts_per_shire;
     eprintln!(
         "  {} shires ({shire_mask:#x}), {} harts total",
-        topo.num_shires(), n_harts,
+        shire_mask.count_ones(), n_harts,
     );
 
     let kernel = device.load_kernel(kernel_elf)

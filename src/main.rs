@@ -91,11 +91,30 @@ struct Args {
     #[arg(long)]
     reset_device: bool,
 
+    /// Override the compute-shire bitmask used for all kernel launches. Each
+    /// set bit enables the corresponding shire (bit 0 = shire 0). The default
+    /// is the full mask reported by the topology query. Use to exclude a faulty
+    /// shire, e.g. --shire-mask 0xfffffffe skips shire 0.
+    #[arg(long, value_parser = parse_hex_or_dec)]
+    shire_mask: Option<u64>,
+
     /// Path to the render-kernel ELF binary (built from render-kernel/).
     /// When provided, ray-casting is performed on the ET-SoC-1 device rather
     /// than on the host CPU, and the render timing line reflects device time.
     #[arg(long, short = 'r')]
     render_kernel: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn parse_hex_or_dec(s: &str) -> Result<u64, String> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else {
+        s.parse::<u64>().map_err(|e| e.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +171,11 @@ fn main() -> Result<()> {
         raw_device
     };
 
+    // --- Resolve effective shire mask ---
+    // The topology-reported mask is used by default; --shire-mask allows a
+    // subset to be selected (e.g. to exclude a faulty shire for diagnostics).
+    let effective_shire_mask: Option<u64> = args.shire_mask;
+
     // --- Compute form-factor matrix on device ---
     // compute_form_factors returns the matrix and the wall-clock duration of
     // the kernel launch itself (excluding DMA transfer time).
@@ -161,6 +185,7 @@ fn main() -> Result<()> {
         &kernel_elf,
         &scene,
         args.trace,
+        effective_shire_mask,
     )?;
     let device_elapsed = t_device_start.elapsed();
 
@@ -188,6 +213,7 @@ fn main() -> Result<()> {
             &radiosities,
             args.width,
             args.height,
+            effective_shire_mask,
         )?;
         rk_kernel_elapsed = Some(rk_elapsed);
 

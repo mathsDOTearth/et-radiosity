@@ -78,6 +78,13 @@ struct Args {
     #[arg(long)]
     trace: bool,
 
+    /// Reset all compute shires before launching any kernel. Use this to
+    /// recover from a previous kernel crash that left the device in a faulted
+    /// state. The device node remains open after the reset; DMA and host state
+    /// are unaffected.
+    #[arg(long)]
+    reset: bool,
+
     /// Path to the render-kernel ELF binary (built from render-kernel/).
     /// When provided, ray-casting is performed on the ET-SoC-1 device rather
     /// than on the host CPU, and the render timing line reflects device time.
@@ -121,6 +128,16 @@ fn main() -> Result<()> {
     // completes in well under 2 s at any supported patch size; 300 s is a
     // conservative ceiling that accommodates DMA transfers and slow paths.
     device.set_default_launch_timeout(Duration::from_secs(300));
+
+    // --- Optional shire reset ---
+    // Recovers from a prior kernel crash that left one or more shires in a
+    // faulted state (firmware returns EXCEPTION on the next launch attempt).
+    if args.reset {
+        let topo = device.topology().context("querying topology for reset")?;
+        eprintln!("Resetting {} shires ({:#x})...", topo.num_shires(), topo.shire_mask);
+        device.reset_shires(topo.shire_mask).context("reset_shires")?;
+        eprintln!("  shires reset -- OK");
+    }
 
     // --- Compute form-factor matrix on device ---
     // compute_form_factors returns the matrix and the wall-clock duration of
